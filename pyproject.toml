@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "master-workflow"
+version = "0.1.0"
+description = "Orchestrator -> worker -> critical reviewer loop over Codex, Grok, OpenCode, Claude, and Kimi. Ships as an MCP server and an agent skill."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Luckey Faraday" }]
+keywords = ["mcp", "agents", "orchestration", "codex", "grok", "opencode", "claude"]
+dependencies = []
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.2.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+master-workflow = "master_workflow.cli:main"
+master-workflow-mcp = "master_workflow.mcp_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/master_workflow"]
+artifacts = ["src/master_workflow/scripts/*.sh"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

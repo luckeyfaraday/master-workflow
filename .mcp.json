@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "master-workflow": {
+      "command": "uv",
+      "args": ["run", "--directory", ".", "--extra", "mcp", "master-workflow-mcp"]
+    }
+  }
+}

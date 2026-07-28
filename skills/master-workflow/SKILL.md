@@ -41,6 +41,19 @@ Turn a soft goal into checkable criteria and show the user before you start:
 Also settle: `threshold` (default 9), `max_iterations` (default 5), and
 `file_scope` if the work should stay in known paths.
 
+**Hard stop before any work — this must survive auto-mode.** A soft "show the
+user first" instruction is overridden by the keep-acting prior when the agent
+runs in auto-mode, and the loop starts unconfirmed. Do not let that happen.
+Reconnaissance reads needed to *write* the criteria (listing files, reading the
+target) are allowed, but the moment you have enough to propose, your turn ends
+with the proposed goal, criteria, routing, threshold, and scope as **plain text
+with no tool call** — a text-only turn ends the turn and waits for the user even
+in auto-mode. Alternatively use the `question` tool to present the proposal as
+choices; a tool that blocks for input also forces the pause. Do not call
+`workflow_create`, `workflow_iterate`, `delegate`, or any shell/write tool that
+advances the work in the same turn you propose the plan. Only after the user's
+next message — even if it is just "go" — do you create the run.
+
 ### 2. Route it
 
 Call `worker_status` to see what is installed on this machine. Propose a
@@ -191,6 +204,9 @@ must never invent a backend API that does not exist yet.
   tell the user it is stuck.
 - Do not raise `max_iterations` silently. That is the user's budget.
 - Do not report "done" for work you have not verified running.
+- Do not start the loop in the same turn you propose criteria, even in
+  auto-mode. End the proposal turn with text and no tool call (or a `question`
+  tool call) so the confirmation pause survives auto-approval.
 
 ## Artifacts
 

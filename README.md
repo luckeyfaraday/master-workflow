@@ -1,25 +1,45 @@
 # master-workflow
 
-**An orchestrator, a worker, and a critical reviewer that will not let the work
-pass until it scores 9 out of 10.**
+**Multi-agent orchestration loop: worker → cross-model reviewer → score ≥ 9.**
 
-You tell your agent what to build, which backend to send it to, and what "done"
-means. It writes a self-contained brief, spawns a worker — **Codex**, **Grok**,
-**OpenCode**, **Claude**, or **Kimi** — captures the real diff from git, then
-hands that diff to a *different model* running read-only, which scores it 0–10
-against your acceptance criteria. Below threshold, the findings become the next
-brief and a **fresh** worker tries again. The loop is deterministic code, not a
-prompt that promises to loop.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![MCP Server](https://img.shields.io/badge/MCP-server-green.svg)](https://modelcontextprotocol.io)
 
-Ships as an **MCP server** and an **agent skill**, plus a plain CLI.
+An AI agent orchestration framework that runs a deterministic build-review loop
+across multiple LLM backends. You define the goal and acceptance criteria; the
+harness spawns a fresh worker agent, captures the real git diff, hands it to a
+*different* model running read-only, and loops until an independent reviewer
+scores the work 9/10 or higher.
+
+Ships as an **MCP server**, an **agent skill**, and a plain **CLI**.
 
 ```
                     ┌──────────────── harness (deterministic) ────────────────┐
 you ─▶ orchestrator ─▶ brief ─▶ worker CLI ─▶ git diff ─▶ reviewer ─▶ score ≥ 9?
-       (your agent)     ▲       fresh ctx     (not the    (other model,   │ no
-                        │                      summary)    read-only)     │
-                        └──────── findings folded into a new brief ◀───────┘
+        (your agent)     ▲       fresh ctx     (not the    (other model,   │ no
+                         │                      summary)    read-only)     │
+                         └──────── findings folded into a new brief ◀───────┘
 ```
+
+## Features
+
+- **Cross-model code review** — the reviewer is never the worker; a different
+  backend grades every diff in a clean, read-only context
+- **Deterministic loop** — the control flow is code, not a prompt that promises
+  to loop; every iteration is auditable
+- **Five backends** — Codex, Grok, Claude, OpenCode, and Kimi, with advisory
+  routing based on task type
+- **Git-native verification** — the reviewer reads the actual diff from git,
+  never the worker's summary
+- **Fresh context per iteration** — each worker spawns clean; findings from the
+  previous round become requirements in the next brief
+- **Sandbox enforcement** — OS-level read-only sandboxes where available
+  (Codex, Grok), with PTY-verified enforcement for Grok
+- **Full audit trail** — every run leaves a filesystem ledger: briefs, diffs,
+  event streams, scores, and verdicts
+- **Session search** — fold decisions from past agent sessions (any backend)
+  into the worker brief
 
 ## Why it is shaped like this
 
@@ -43,9 +63,13 @@ the command still exits `0`. The vendored wrapper supplies a PTY and then
 *verifies* enforcement after the fact, reporting `NOT ENFORCED` rather than
 letting an unconfined run pass as a sandboxed one.
 
-## Install
+## Requirements
 
-Requires Python 3.10+ and at least two agent CLIs (one to work, one to review).
+- Python 3.10+
+- At least two agent CLIs installed (one to work, one to review)
+- Git
+
+## Installation
 
 ```bash
 git clone https://github.com/luckeyfaraday/master-workflow
@@ -77,7 +101,7 @@ harness prefers `os-enforced` reviewers automatically.
 claude mcp add --scope user master-workflow -- /path/to/master-workflow/.venv/bin/master-workflow-mcp
 ```
 
-### As a skill
+### As an agent skill
 
 ```bash
 ln -s "$PWD/skills/master-workflow" ~/.claude/skills/master-workflow
@@ -88,7 +112,7 @@ Then just talk to your agent:
 > Use master-workflow to add rate limiting to the API. Send it to Codex, have
 > Claude review it, and don't stop until it's a 9.
 
-## Which backend for what
+## Backend routing
 
 Suggestions, not rules — your explicit choice always wins.
 
@@ -103,7 +127,7 @@ Suggestions, not rules — your explicit choice always wins.
 `master-workflow suggest "<task>"` scores a task against these and explains the
 route it picks.
 
-## Use it from the CLI
+## CLI usage
 
 ```bash
 master-workflow run \
@@ -194,7 +218,7 @@ The reviewer is calibrated to be hard to please:
 A review that fails to emit its JSON verdict is capped below threshold — an
 unparsed review can never end the loop on its own.
 
-## Credits
+## Related projects
 
 Consolidates ideas from [codex-router](https://github.com/luckeyfaraday/codex-router),
 [delegate-to-grok](https://github.com/luckeyfaraday/delegate-to-grok),
@@ -208,4 +232,4 @@ sandbox wrapper is vendored from `delegate-to-grok`.
 
 ## License
 
-MIT
+[MIT](LICENSE)

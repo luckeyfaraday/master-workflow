@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 import uuid
@@ -151,31 +152,46 @@ class Adapter:
         (out_dir / "argv.json").write_text(json.dumps(argv, indent=2))
 
         env = {**os.environ, "MASTER_WORKFLOW_RUN": "1"}
+        raw_log, err_log = out_dir / "raw.log", out_dir / "stderr.log"
+        stdin_text = self._stdin(prompt)
         started = time.time()
         timed_out = False
-        raw, err, code = "", "", 1
+        code = 1
+        spawn_error: str | None = None
         try:
-            proc = subprocess.run(
-                argv,
-                cwd=str(cwd),
-                input=self._stdin(prompt),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-            )
-            raw, err, code = proc.stdout or "", proc.stderr or "", proc.returncode
-        except subprocess.TimeoutExpired as e:
-            timed_out = True
-            raw = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-            err = (e.stderr or b"").decode(errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
-            code = 124
+            # The child writes straight into raw.log instead of into a pipe, so
+            # the log is readable *while* the worker runs. That is what makes
+            # progress reporting and `tail -f` possible at all --- a pipe holds
+            # everything until the process exits.
+            with raw_log.open("wb") as out_fh, err_log.open("wb") as err_fh:
+                proc = subprocess.Popen(
+                    argv,
+                    cwd=str(cwd),
+                    # Never let a worker inherit our stdin: when this runs inside
+                    # the MCP server that descriptor is the JSON-RPC transport.
+                    stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+                    stdout=out_fh,
+                    stderr=err_fh,
+                    text=True,
+                    env=env,
+                    # Own process group, so a timeout can take down the whole
+                    # tree. A worker CLI spawns children that hold the provider
+                    # connections; killing only the parent leaves them running.
+                    start_new_session=True,
+                )
+                try:
+                    proc.communicate(input=stdin_text, timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    _kill_tree(proc)
+                    proc.communicate()
+                code = 124 if timed_out else proc.returncode
         except OSError as e:
-            err, code = str(e), 126
+            spawn_error, code = str(e), 126
 
         duration = time.time() - started
-        (out_dir / "raw.log").write_text(raw)
-        (out_dir / "stderr.log").write_text(err)
+        raw = _read_text(raw_log)
+        err = spawn_error or _read_text(err_log)
         try:
             self._finalize(out_dir, raw)
         except (OSError, ValueError) as e:  # never lose a run to a parse bug
@@ -217,6 +233,43 @@ class Adapter:
 
     def _sandbox_state(self, out_dir: Path, read_only: bool) -> str:
         return "read-only" if read_only else "workspace-write"
+
+
+def _read_text(p: Path) -> str:
+    try:
+        return p.read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """End a timed-out worker and everything it spawned.
+
+    SIGTERM first so the CLI can flush its log, SIGKILL if it will not go.
+    Falls back to signalling just the process when there is no group to signal
+    (a platform without ``killpg``, or a child that already reaped itself).
+    """
+    try:
+        pgid: int | None = os.getpgid(proc.pid)
+        # If the child somehow shares our group, signalling the group would take
+        # down this process too --- the MCP server, or the test runner.
+        if pgid == os.getpgid(0):
+            pgid = None
+    except (OSError, AttributeError):
+        pgid = None
+    for sig, direct in ((signal.SIGTERM, proc.terminate), (signal.SIGKILL, proc.kill)):
+        try:
+            if pgid is None:
+                direct()
+            else:
+                os.killpg(pgid, sig)
+        except (OSError, AttributeError):
+            direct()
+        try:
+            proc.wait(timeout=10)
+            return
+        except subprocess.TimeoutExpired:
+            continue
 
 
 #: Failures that no amount of iterating will fix. Matched against whatever the

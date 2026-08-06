@@ -67,9 +67,12 @@ class OpenCodeAdapter(Adapter):
         "provider/model — run `opencode models` to see what is authenticated."
     )
     known_models = ()
+    supports_variants = True
     supports_read_only = False  # no enforced read-only mode; reviewers use others
 
-    def _argv(self, *, prompt_file, prompt, cwd, out_dir, model, read_only, resume, session_id):
+    def _argv(
+        self, *, prompt_file, prompt, cwd, out_dir, model, variant, read_only, resume, session_id
+    ):
         argv = [
             "bash",
             str(script_path("run-opencode.sh")),
@@ -82,6 +85,8 @@ class OpenCodeAdapter(Adapter):
         ]
         if model:
             argv += ["-m", model]
+        if variant:
+            argv += ["--variant", variant]
         if resume:
             argv += ["--resume", resume]
         argv.append("-")

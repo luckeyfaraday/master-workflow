@@ -6,7 +6,7 @@
 # one addition: --run-dir, so the caller owns the artifact location.
 #
 # Usage:
-#   run-opencode.sh [-C dir] [-m provider/model] [-l label]
+#   run-opencode.sh [-C dir] [-m provider/model] [--variant name] [-l label]
 #                   [--run-dir DIR] [--resume <session-id>] [--fork]
 #                   [--agent <name>] [--no-auto] <prompt | ->
 #
@@ -16,6 +16,7 @@
 set -euo pipefail
 
 MODEL="${MASTER_WORKFLOW_OPENCODE_MODEL:-}"
+VARIANT="${MASTER_WORKFLOW_OPENCODE_VARIANT:-}"
 WORKDIR="$PWD"
 LABEL="run"
 RUN_DIR=""
@@ -30,6 +31,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -C|--cd)       WORKDIR="$2"; shift 2 ;;
     -m|--model)    MODEL="$2"; shift 2 ;;
+    --variant)     VARIANT="$2"; shift 2 ;;
     -l|--label)    LABEL="$2"; shift 2 ;;
     --run-dir)     RUN_DIR="$2"; shift 2 ;;
     --resume)      RESUME="$2"; shift 2 ;;
@@ -61,13 +63,14 @@ args=(opencode run --format json --dir "$WORKDIR" --title "$LABEL")
 # Older builds spelled this --auto; current ones only accept the long form.
 [[ $AUTO -eq 1 ]]   && args+=(--dangerously-skip-permissions)
 [[ -n "$MODEL" ]]   && args+=(-m "$MODEL")
+[[ -n "$VARIANT" ]] && args+=(--variant "$VARIANT")
 [[ -n "$AGENT" ]]   && args+=(--agent "$AGENT")
 [[ -n "$RESUME" ]]  && args+=(-s "$RESUME")
 [[ $FORK -eq 1 ]]   && args+=(--fork)
 args+=("$(cat "$RUN_DIR/prompt.md")")
 
 echo "RUN_DIR=$RUN_DIR"
-echo "model=${MODEL:-<opencode default>} workdir=$WORKDIR${RESUME:+ resume=$RESUME}"
+echo "model=${MODEL:-<opencode default>} variant=${VARIANT:-<opencode default>} workdir=$WORKDIR${RESUME:+ resume=$RESUME}"
 
 set +e
 "${args[@]}" > "$RUN_DIR/raw.agent.log" 2> "$RUN_DIR/stderr.log"

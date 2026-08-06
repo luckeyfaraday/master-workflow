@@ -194,6 +194,7 @@ def workflow_create(
     cwd: str,
     worker_backend: str = "codex",
     worker_model: str | None = None,
+    worker_variant: str | None = None,
     reviewer_backend: str | None = None,
     reviewer_model: str | None = None,
     threshold: float = 9.0,
@@ -212,6 +213,9 @@ def workflow_create(
         worker_backend: codex | grok | opencode | claude | kimi.
         worker_model: Optional model override, e.g. gpt-5.6-sol, grok-build-0.1,
             or a provider/model string for opencode.
+        worker_variant: Optional backend model variant/reasoning effort, e.g.
+            xhigh or max. Passed as model_reasoning_effort for Codex and --variant
+            for OpenCode; rejected by backends that do not support it.
         reviewer_backend: Leave null to auto-pick a backend different from the
             worker. Set it to pin a specific reviewer.
         threshold: Score the reviewer must give to stop. Default 9.0 of 10.
@@ -227,6 +231,7 @@ def workflow_create(
         cwd=cwd,
         worker_backend=worker_backend,
         worker_model=worker_model,
+        worker_variant=worker_variant,
         reviewer_backend=reviewer_backend,
         reviewer_model=reviewer_model,
         threshold=threshold,
@@ -239,7 +244,11 @@ def workflow_create(
     return {
         "run_id": state.run_id,
         "run_dir": str(rundir.run_path(state.run_id)),
-        "worker": {"backend": worker_backend, "model": worker_model},
+        "worker": {
+            "backend": worker_backend,
+            "model": worker_model,
+            "variant": worker_variant,
+        },
         "reviewer": {"backend": reviewer, "model": reviewer_model, "auto": reviewer_backend is None},
         "threshold": threshold,
         "max_iterations": max_iterations,
@@ -356,6 +365,11 @@ def workflow_status(run_id: str) -> dict:
         "threshold": state.threshold,
         "iterations_run": len(state.iterations),
         "max_iterations": state.max_iterations,
+        "worker": {
+            "backend": state.worker_backend,
+            "model": state.worker_model,
+            "variant": state.worker_variant,
+        },
         "running": bool(_threads.get(run_id) and _threads[run_id].is_alive()),
         "history": [
             {
@@ -429,6 +443,7 @@ async def delegate(
     backend: str = "codex",
     acceptance_criteria: str = "",
     model: str | None = None,
+    variant: str | None = None,
     file_scope: list[str] | None = None,
     constraints: list[str] | None = None,
     context_notes: str = "",
@@ -443,6 +458,9 @@ async def delegate(
     reach a quality bar, use workflow_create + workflow_iterate instead.
 
     Args:
+        variant: Backend model variant/reasoning effort. Passed as
+            model_reasoning_effort for Codex and --variant for OpenCode. Backends
+            without model variant support reject it rather than silently ignoring it.
         read_only: Run with writes disabled --- use for analysis and review tasks.
         resume: Continue a prior session id instead of starting fresh.
     """
@@ -463,13 +481,24 @@ async def delegate(
     (out_dir / "brief.md").write_text(brief.render())
 
     snap = rundir.snapshot(cwd_path)
-    rundir.ledger(run_id, "delegate.start", backend=backend, model=model, read_only=read_only)
+    rundir.ledger(
+        run_id,
+        "delegate.start",
+        backend=backend,
+        model=model,
+        variant=variant,
+        read_only=read_only,
+    )
 
     def describe(phase: dict[str, Any]) -> tuple[float, float | None, str]:
         line = _status_line(
             out_dir,
             phase["since"],
-            " ".join(x for x in (backend, model) if x),
+            " ".join(
+                x
+                for x in (backend, model, f"variant={variant}" if variant else "")
+                if x
+            ),
             "read-only" if read_only else "",
         )
         # Elapsed against the timeout: the only budget a single worker run has.
@@ -482,6 +511,7 @@ async def delegate(
             cwd=cwd_path,
             out_dir=out_dir,
             model=model,
+            variant=variant,
             read_only=read_only,
             resume=resume,
             timeout=timeout,

@@ -127,6 +127,29 @@ Suggestions, not rules — your explicit choice always wins.
 `master-workflow suggest "<task>"` scores a task against these and explains the
 route it picks.
 
+OpenCode model variants (provider-specific reasoning effort) are explicit and
+audited. Pass `--variant` alongside the provider/model; the selected value is
+stored in the run state and logged by the wrapper:
+
+```bash
+master-workflow run \
+  --goal "Implement the requested change" \
+  --criteria "Tests pass and the requested behavior is covered" \
+  --backend opencode \
+  --model openrouter/qwen/qwen3-coder \
+  --variant high
+```
+
+The same field controls Codex reasoning effort by setting
+`model_reasoning_effort` for the worker process, overriding the user-level
+default. Codex accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and
+`max`:
+
+```bash
+master-workflow run ... --backend codex --model gpt-5.6-sol --variant xhigh
+master-workflow run ... --backend codex --model gpt-5.6-luna --variant max
+```
+
 ## CLI usage
 
 ```bash
@@ -165,7 +188,7 @@ Other commands: `status`, `suggest`, `iterate <run_id>`, `list`, `show <run_id>`
 | `worker_status` | What's installed, what each backend is good at, who can review |
 | `suggest_backend` | Advisory route for a task description |
 | `search_sessions` / `show_session` | Full-text search across Claude Code, Codex, opencode, and Hermes history |
-| `workflow_create` | Register goal + criteria + routing; returns a `run_id` |
+| `workflow_create` | Register goal + criteria + routing, including optional `worker_variant`; returns a `run_id` |
 | `workflow_iterate` | One worker → reviewer cycle, blocking. The primary driver |
 | `workflow_run_background` | Hand the whole loop off; poll `workflow_status` |
 | `workflow_status` / `workflow_list` / `workflow_ledger` | Progress and audit |

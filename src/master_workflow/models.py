@@ -95,6 +95,7 @@ class WorkerResult:
     session_id: str | None
     run_dir: str
     last_message: str
+    variant: str | None = None
     diff: str = ""
     files_changed: list[str] = field(default_factory=list)
     sandbox: str = "unknown"
@@ -151,6 +152,7 @@ class RunState:
     max_iterations: int = 5
     worker_backend: str = "codex"
     worker_model: str | None = None
+    worker_variant: str | None = None
     reviewer_backend: str | None = None  # None => auto cross-model
     reviewer_model: str | None = None
     file_scope: list[str] = field(default_factory=list)

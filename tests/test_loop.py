@@ -31,8 +31,19 @@ class StubWorker(Adapter):
     def available(self):
         return True
 
-    def run(self, *, prompt, cwd, out_dir, model=None, read_only=False, resume=None, timeout=0):
-        self.calls.append({"prompt": prompt, "resume": resume})
+    def run(
+        self,
+        *,
+        prompt,
+        cwd,
+        out_dir,
+        model=None,
+        variant=None,
+        read_only=False,
+        resume=None,
+        timeout=0,
+    ):
+        self.calls.append({"prompt": prompt, "resume": resume, "variant": variant})
         step = self.scripted.pop(0) if self.scripted else {}
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         for name, content in (step.get("writes") or {}).items():
@@ -40,6 +51,7 @@ class StubWorker(Adapter):
         return WorkerResult(
             backend=self.name,
             model=model,
+            variant=variant,
             exit_code=step.get("exit_code", 0),
             session_id=step.get("session_id", "sess-1"),
             run_dir=str(out_dir),
@@ -64,7 +76,18 @@ class StubReviewer(Adapter):
     def available(self):
         return True
 
-    def run(self, *, prompt, cwd, out_dir, model=None, read_only=False, resume=None, timeout=0):
+    def run(
+        self,
+        *,
+        prompt,
+        cwd,
+        out_dir,
+        model=None,
+        variant=None,
+        read_only=False,
+        resume=None,
+        timeout=0,
+    ):
         self.seen_diffs.append(prompt)
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         if self.fail:
@@ -182,6 +205,30 @@ def test_carry_session_continues_the_previous_worker(repo, wire):
 
     assert worker.calls[0]["resume"] is None
     assert worker.calls[1]["resume"] == "sess-1"
+
+
+def test_worker_variant_is_persisted_logged_and_forwarded(repo, wire):
+    worker = StubWorker([{"writes": {"a.py": "DONE\n"}}])
+    worker.supports_variants = True
+    reviewer = StubReviewer([9])
+    wire(worker, reviewer)
+
+    run_id = _run(repo, worker, reviewer, worker_variant="high")
+    loop.iterate(run_id)
+
+    assert worker.calls[0]["variant"] == "high"
+    assert rundir.read_state(run_id).worker_variant == "high"
+    start = next(e for e in rundir.read_ledger(run_id) if e["event"] == "worker.start")
+    assert start["variant"] == "high"
+
+
+def test_worker_variant_is_rejected_when_backend_does_not_support_it(repo, wire):
+    worker = StubWorker([])
+    reviewer = StubReviewer([9])
+    wire(worker, reviewer)
+
+    with pytest.raises(ValueError, match="does not support model variants"):
+        _run(repo, worker, reviewer, worker_variant="high")
 
 
 def test_reviewer_sees_the_diff_not_the_worker_message(repo, wire):

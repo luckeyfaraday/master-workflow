@@ -7,6 +7,7 @@ reviewer selection, fatal-error classification, and diff capture.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 import time
@@ -15,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from master_workflow import adapters, rundir
-from master_workflow.adapters.base import Adapter, is_fatal
+from master_workflow.adapters.base import Adapter, is_fatal, script_path
 from master_workflow.models import Brief, RunState, WorkerResult
 from master_workflow.review import build_review_brief, parse_review
 
@@ -256,6 +257,101 @@ def test_nonzero_exit_reports_the_stream_error_not_just_the_code(tmp_path):
     )
     assert not r.ok
     assert "usage limit" in r.error  # the fatal message wins over the warning
+
+
+# --- backend model variants ------------------------------------------------
+
+
+def test_opencode_adapter_passes_variant_to_wrapper(tmp_path):
+    argv = adapters.get("opencode")._argv(
+        prompt_file=tmp_path / "prompt.md",
+        prompt="p",
+        cwd=tmp_path,
+        out_dir=tmp_path / "out",
+        model="openrouter/qwen/qwen3-coder",
+        variant="high",
+        read_only=False,
+        resume=None,
+        session_id="session",
+    )
+
+    assert argv[argv.index("-m") + 1] == "openrouter/qwen/qwen3-coder"
+    assert argv[argv.index("--variant") + 1] == "high"
+
+
+def test_opencode_wrapper_forwards_and_logs_variant(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    capture = tmp_path / "opencode-argv"
+    fake = bin_dir / "opencode"
+    fake.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$@\" > \"$OPENCODE_ARGV_CAPTURE\"\n"
+        "printf '%s\\n' '{\"type\":\"text\",\"text\":\"ok\",\"sessionID\":\"s1\"}'\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("OPENCODE_ARGV_CAPTURE", str(capture))
+    run_dir = tmp_path / "run"
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(script_path("run-opencode.sh")),
+            "-C",
+            str(tmp_path),
+            "--run-dir",
+            str(run_dir),
+            "-m",
+            "openrouter/qwen/qwen3-coder",
+            "--variant",
+            "high",
+            "prompt",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    args = capture.read_text().splitlines()
+    assert args[args.index("--variant") + 1] == "high"
+    assert "model=openrouter/qwen/qwen3-coder variant=high" in completed.stdout
+
+
+def test_adapter_without_variant_support_rejects_variant(tmp_path):
+    with pytest.raises(ValueError, match="does not support model variants"):
+        _Echo([]).run(
+            prompt="p",
+            cwd=tmp_path,
+            out_dir=tmp_path / "o",
+            variant="high",
+        )
+
+
+@pytest.mark.parametrize(
+    "effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+)
+def test_codex_accepts_and_forwards_reasoning_effort(tmp_path, effort):
+    adapter = adapters.get("codex")
+    adapter.validate_variant(effort)
+    argv = adapter._argv(
+        prompt_file=tmp_path / "prompt.md",
+        prompt="p",
+        cwd=tmp_path,
+        out_dir=tmp_path / "out",
+        model="gpt-5.6-sol",
+        variant=effort,
+        read_only=False,
+        resume=None,
+        session_id="session",
+    )
+
+    assert f'model_reasoning_effort="{effort}"' in argv
+
+
+def test_codex_rejects_unknown_reasoning_effort():
+    with pytest.raises(ValueError, match="invalid codex variant"):
+        adapters.get("codex").validate_variant("ultra")
 
 
 def test_missing_binary_is_reported_not_raised(tmp_path):

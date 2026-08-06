@@ -42,6 +42,8 @@ def available() -> dict[str, dict]:
             "version": ad.version() if ok else None,
             "strengths": ad.strengths,
             "known_models": list(ad.known_models),
+            "supports_variants": ad.supports_variants,
+            "known_variants": list(ad.known_variants),
             "supports_read_only": ad.supports_read_only,
             "read_only_enforced": ad.read_only_enforced,
         }

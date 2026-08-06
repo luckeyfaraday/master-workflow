@@ -41,6 +41,10 @@ class Adapter:
     strengths: str = ""
     #: Models worth naming explicitly. First entry is the adapter default.
     known_models: tuple[str, ...] = ()
+    #: Whether this CLI accepts a provider-specific model variant/effort level.
+    supports_variants: bool = False
+    #: Accepted values when the backend has a fixed set. Empty means provider-specific.
+    known_variants: tuple[str, ...] = ()
     #: Can this backend run a review pass with editing suppressed?
     supports_read_only: bool = True
     #: Is that suppression enforced by the OS/sandbox rather than by asking the
@@ -63,6 +67,15 @@ class Adapter:
         except (OSError, subprocess.SubprocessError, IndexError):
             return None
 
+    def validate_variant(self, variant: str | None) -> None:
+        if not variant:
+            return
+        if not self.supports_variants:
+            raise ValueError(f"{self.name} does not support model variants")
+        if self.known_variants and variant not in self.known_variants:
+            choices = ", ".join(self.known_variants)
+            raise ValueError(f"invalid {self.name} variant {variant!r}; choose one of: {choices}")
+
     # -- the one method backends customise ----------------------------------
 
     def _argv(
@@ -76,6 +89,7 @@ class Adapter:
         read_only: bool,
         resume: str | None,
         session_id: str,
+        variant: str | None = None,
     ) -> list[str]:
         raise NotImplementedError
 
@@ -116,6 +130,7 @@ class Adapter:
         cwd: Path,
         out_dir: Path,
         model: str | None = None,
+        variant: str | None = None,
         read_only: bool = False,
         resume: str | None = None,
         timeout: int = DEFAULT_TIMEOUT,
@@ -124,10 +139,13 @@ class Adapter:
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        self.validate_variant(variant)
+
         if not self.available():
             return WorkerResult(
                 backend=self.name,
                 model=model,
+                variant=variant,
                 exit_code=127,
                 session_id=None,
                 run_dir=str(out_dir),
@@ -139,7 +157,7 @@ class Adapter:
         prompt_file.write_text(prompt)
         session_id = resume or str(uuid.uuid4())
 
-        argv = self._argv(
+        argv_kwargs: dict[str, Any] = dict(
             prompt_file=prompt_file,
             prompt=prompt,
             cwd=cwd,
@@ -149,6 +167,11 @@ class Adapter:
             resume=resume,
             session_id=session_id,
         )
+        # Preserve compatibility with adapters that implement the original
+        # seam: only variant-aware adapters receive the additional keyword.
+        if self.supports_variants:
+            argv_kwargs["variant"] = variant
+        argv = self._argv(**argv_kwargs)
         (out_dir / "argv.json").write_text(json.dumps(argv, indent=2))
 
         env = {**os.environ, "MASTER_WORKFLOW_RUN": "1"}
@@ -221,6 +244,7 @@ class Adapter:
         return WorkerResult(
             backend=self.name,
             model=model,
+            variant=variant,
             exit_code=code,
             session_id=sid,
             run_dir=str(out_dir),

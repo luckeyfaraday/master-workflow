@@ -54,6 +54,11 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--cwd", default=".")
     r.add_argument("--backend", default="codex")
     r.add_argument("--model", default=None)
+    r.add_argument(
+        "--variant",
+        default=None,
+        help="backend model variant/reasoning effort (for example xhigh or max)",
+    )
     r.add_argument("--reviewer", default=None, help="pin a reviewer backend")
     r.add_argument("--reviewer-model", default=None)
     r.add_argument("--threshold", type=float, default=9.0)
@@ -96,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
             cwd=a.cwd,
             worker_backend=a.backend,
             worker_model=a.model,
+            worker_variant=a.variant,
             reviewer_backend=a.reviewer,
             reviewer_model=a.reviewer_model,
             threshold=a.threshold,
@@ -105,7 +111,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         reviewer = adapters.pick_reviewer(a.backend, a.reviewer)
         print(f"run_id={state.run_id}")
-        print(f"worker={a.backend} reviewer={reviewer} threshold={a.threshold}")
+        worker_config = " ".join(
+            x
+            for x in (
+                a.backend,
+                f"model={a.model}" if a.model else "",
+                f"variant={a.variant}" if a.variant else "",
+            )
+            if x
+        )
+        print(f"worker={worker_config} reviewer={reviewer} threshold={a.threshold}")
         print(f"run_dir={rundir.run_path(state.run_id)}")
         for _ in range(a.max_iterations):
             res = loop.iterate(state.run_id, carry_session=a.carry_session)

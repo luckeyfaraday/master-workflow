@@ -104,6 +104,7 @@ Fold what you find into `context_notes`. Summarize it; do not paste transcripts.
 workflow_create(
   goal, success_criteria, cwd,
   worker_backend, worker_model,
+  worker_variant=None,        # Backend effort, e.g. Codex xhigh or OpenCode max
   reviewer_backend=None,      # None = auto cross-model
   threshold=9, max_iterations=5,
   file_scope=[...], constraints=[...], context_notes="..."

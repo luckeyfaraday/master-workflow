@@ -37,6 +37,7 @@ def create_run(
     cwd: str,
     worker_backend: str = "codex",
     worker_model: str | None = None,
+    worker_variant: str | None = None,
     reviewer_backend: str | None = None,
     reviewer_model: str | None = None,
     threshold: float = 9.0,
@@ -45,7 +46,8 @@ def create_run(
     constraints: list[str] | None = None,
     context: str = "",
 ) -> RunState:
-    adapters.get(worker_backend)  # fail fast on a typo'd backend
+    worker_adapter = adapters.get(worker_backend)  # fail fast on a typo'd backend
+    worker_adapter.validate_variant(worker_variant)
     if reviewer_backend:
         adapters.get(reviewer_backend)
     cwd_path = Path(cwd).expanduser().resolve()
@@ -61,6 +63,7 @@ def create_run(
         max_iterations=max_iterations,
         worker_backend=worker_backend,
         worker_model=worker_model,
+        worker_variant=worker_variant,
         reviewer_backend=reviewer_backend,
         reviewer_model=reviewer_model,
         file_scope=file_scope or [],
@@ -74,6 +77,8 @@ def create_run(
         goal=goal,
         cwd=str(cwd_path),
         worker=worker_backend,
+        model=worker_model,
+        variant=worker_variant,
         reviewer=reviewer_backend or "auto",
         threshold=threshold,
     )
@@ -150,6 +155,7 @@ def iterate(
         iteration=n,
         backend=state.worker_backend,
         model=state.worker_model,
+        variant=state.worker_variant,
         resumed=bool(resume),
         carried_findings=len(findings),
     )
@@ -160,6 +166,7 @@ def iterate(
         cwd=cwd,
         out_dir=worker_dir,
         model=state.worker_model,
+        variant=state.worker_variant,
         read_only=False,
         resume=resume,
         timeout=worker_timeout,
@@ -234,6 +241,8 @@ def iterate(
             ),
             "worker": {
                 "backend": worker.backend,
+                "model": worker.model,
+                "variant": worker.variant,
                 "exit_code": worker.exit_code,
                 "last_message": worker.last_message[-2000:],
                 "run_dir": worker.run_dir,
@@ -343,6 +352,7 @@ def iterate(
         "worker": {
             "backend": worker.backend,
             "model": worker.model,
+            "variant": worker.variant,
             "exit_code": worker.exit_code,
             "session_id": worker.session_id,
             "files_changed": worker.files_changed,

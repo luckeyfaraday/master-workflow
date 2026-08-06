@@ -54,8 +54,14 @@ def run_path(run_id: str) -> Path:
     return runs_root() / run_id
 
 
+def iteration_dir(run_id: str, n: int, role: str) -> Path:
+    """Where one role's artifacts live. Does not create it --- use this to look
+    at an iteration that may not have started yet."""
+    return run_path(run_id) / "iterations" / f"{n:02d}" / role
+
+
 def iteration_path(run_id: str, n: int, role: str) -> Path:
-    p = run_path(run_id) / "iterations" / f"{n:02d}" / role
+    p = iteration_dir(run_id, n, role)
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -124,6 +130,62 @@ def read_ledger(run_id: str) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
     return out
+
+
+# --- liveness ---------------------------------------------------------------
+#
+# Because a worker streams into raw.log as it goes, anyone can tell how far
+# along it is without waiting for it to exit. This is what the MCP layer turns
+# into progress notifications, and what a `tail -f` would show you directly.
+
+
+def tail(path: Path, limit: int = 4096) -> str:
+    """The last ``limit`` bytes of a file that may still be being written."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > limit:
+                fh.seek(size - limit)
+            return fh.read().decode(errors="replace")
+    except OSError:
+        return ""
+
+
+def _event_label(obj: dict[str, Any]) -> str | None:
+    """A short name for what the agent was last doing."""
+    typ = obj.get("type")
+    if not isinstance(typ, str):
+        return None
+    item = obj.get("item")
+    if isinstance(item, dict) and isinstance(item.get("type"), str):
+        return f"{typ}:{item['type']}"
+    return typ
+
+
+def log_progress(out_dir: Path) -> dict[str, Any]:
+    """How much a running worker has produced, and what it last did.
+
+    Only the tail of the log is read, so this stays cheap when polled --- the
+    point is a liveness signal, not a transcript.
+    """
+    raw = Path(out_dir) / "raw.log"
+    try:
+        size = raw.stat().st_size
+    except OSError:
+        return {}
+    label: str | None = None
+    # The final line is often a partial write; walk backwards to the last one
+    # that actually parses.
+    for line in reversed(tail(raw).splitlines()):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            label = _event_label(obj)
+            if label:
+                break
+    return {"bytes": size, "last_event": label}
 
 
 # --- diff capture -----------------------------------------------------------

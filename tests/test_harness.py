@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -263,6 +265,91 @@ def test_missing_binary_is_reported_not_raised(tmp_path):
     r = Missing().run(prompt="p", cwd=tmp_path, out_dir=tmp_path / "o")
     assert r.exit_code == 127
     assert "not found" in r.error
+
+
+# --- live output ------------------------------------------------------------
+#
+# The worker writes into raw.log as it goes rather than into a pipe drained at
+# exit. Everything that can report on a run in flight --- progress
+# notifications, `tail -f`, a dashboard --- depends on that, so it is tested
+# directly rather than assumed from the implementation.
+
+
+class _Drip(Adapter):
+    """Emits one event every ``gap`` seconds, so the log grows observably."""
+
+    name, binary = "drip", "sh"
+
+    def __init__(self, count=4, gap=0.3):
+        self.count, self.gap = count, gap
+
+    def _argv(self, *, prompt_file, prompt, cwd, out_dir, model, read_only, resume, session_id):
+        ev = json.dumps({"type": "item.completed", "item": {"type": "command_execution"}})
+        body = "".join(f"printf '%s\\n' {json.dumps(ev)}; sleep {self.gap}; " for _ in range(self.count))
+        return ["sh", "-c", f"{body}exit 0"]
+
+
+def test_log_is_readable_while_the_worker_is_still_running(tmp_path):
+    out = tmp_path / "o"
+    sizes = []
+
+    def watch():
+        for _ in range(6):
+            time.sleep(0.2)
+            sizes.append(rundir.log_progress(out).get("bytes", 0))
+
+    t = threading.Thread(target=watch)
+    t.start()
+    r = _Drip().run(prompt="p", cwd=tmp_path, out_dir=out, timeout=30)
+    t.join()
+
+    assert r.ok
+    # The point: the log grew during the run, not all at once at the end.
+    assert len(set(sizes)) > 1, f"log did not grow mid-flight: {sizes}"
+
+
+def test_log_progress_names_what_the_agent_last_did(tmp_path):
+    out = tmp_path / "o"
+    _Drip(count=1, gap=0).run(prompt="p", cwd=tmp_path, out_dir=out, timeout=30)
+    assert rundir.log_progress(out)["last_event"] == "item.completed:command_execution"
+
+
+def test_log_progress_on_a_run_that_never_started_is_empty(tmp_path):
+    assert rundir.log_progress(tmp_path / "nope") == {}
+
+
+def test_timeout_kills_the_children_the_worker_spawned(tmp_path):
+    # A worker CLI spawns children that hold the provider connections. Killing
+    # only the parent leaves them running, burning quota against a run the
+    # harness has already given up on.
+    marker = tmp_path / "orphan-ran"
+
+    class Hang(Adapter):
+        name, binary = "hang", "sh"
+
+        def _argv(self, *, prompt_file, prompt, cwd, out_dir, model, read_only, resume, session_id):
+            return ["sh", "-c", f"(sleep 1; touch {marker}) & sleep 30"]
+
+    r = Hang().run(prompt="p", cwd=tmp_path, out_dir=tmp_path / "o", timeout=1)
+    assert r.timed_out and r.exit_code == 124
+    time.sleep(2)
+    assert not marker.exists(), "a child outlived the timeout that killed its parent"
+
+
+def test_output_written_before_a_timeout_is_not_lost(tmp_path):
+    # Buffering everything in a pipe used to mean a killed worker took its
+    # entire log with it, leaving nothing to diagnose.
+    out = tmp_path / "o"
+
+    class Chatty(Adapter):
+        name, binary = "hang", "sh"
+
+        def _argv(self, *, prompt_file, prompt, cwd, out_dir, model, read_only, resume, session_id):
+            return ["sh", "-c", 'printf \'{"type":"start"}\\n\'; sleep 30']
+
+    r = Chatty().run(prompt="p", cwd=tmp_path, out_dir=out, timeout=1)
+    assert r.timed_out
+    assert '{"type":"start"}' in (out / "raw.log").read_text()
 
 
 # --- review brief -----------------------------------------------------------

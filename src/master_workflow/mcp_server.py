@@ -15,15 +15,18 @@ Tool surface, in the order an orchestrator normally uses it:
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+import anyio
 
 from . import adapters, context, loop, routing, rundir
 from .models import Brief
 
 try:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import Context, FastMCP
 except ImportError as e:  # pragma: no cover
     raise SystemExit(
         "The MCP server needs the `mcp` package:\n"
@@ -34,6 +37,92 @@ except ImportError as e:  # pragma: no cover
 mcp = FastMCP("master-workflow")
 
 _threads: dict[str, threading.Thread] = {}
+
+
+# --- progress ---------------------------------------------------------------
+#
+# workflow_iterate can block for the better part of an hour (a 1800s worker
+# followed by a 1200s review) and a tool call cannot say anything before it
+# returns. Progress notifications are the one channel that can: they travel on
+# the same transport while the call is still pending, and the client renders
+# them on the pending tool call rather than adding them to the conversation ---
+# so they cost the caller no context.
+
+#: How often a blocking tool re-reports. Frequent enough to look alive, rare
+#: enough that polling the log costs nothing.
+_POLL_SECONDS = 5.0
+
+
+def _human_bytes(n: int) -> str:
+    if n >= 1_048_576:
+        return f"{n / 1_048_576:.1f} MB"
+    return f"{n // 1024} KB" if n >= 1024 else f"{n} B"
+
+
+def _human_secs(s: float) -> str:
+    m, sec = divmod(int(s), 60)
+    return f"{m}m{sec:02d}s" if m else f"{sec}s"
+
+
+async def _notify(ctx: Context, progress: float, total: float | None, message: str) -> None:
+    """Best-effort progress.
+
+    Two things must not happen: a notification must never take down a run that
+    is 20 minutes deep, and nothing should break when the client did not ask for
+    progress (it only receives these if it sent a progressToken).
+    """
+    try:
+        await ctx.report_progress(progress=progress, total=total, message=message)
+    except Exception:  # noqa: BLE001 - reporting is never worth failing a run over
+        pass
+
+
+def _status_line(out_dir: Path, since: float, *prefix: str) -> str:
+    bits = [b for b in prefix if b]
+    bits.append(_human_secs(time.time() - since))
+    live = rundir.log_progress(out_dir)
+    if live.get("bytes"):
+        bits.append(_human_bytes(live["bytes"]))
+    if live.get("last_event"):
+        bits.append(live["last_event"])
+    return " · ".join(bits)
+
+
+async def _with_progress(
+    ctx: Context,
+    work: Callable[[Callable[[str, dict], None]], Any],
+    describe: Callable[[dict[str, Any]], tuple[float, float | None, str]],
+    initial: dict[str, Any],
+) -> Any:
+    """Run a blocking function in a worker thread while streaming progress.
+
+    ``work`` is handed an ``emit(event, data)`` callback --- the same hook
+    ``loop.iterate`` already accepts for its phase transitions --- and
+    ``describe`` turns the latest phase into one status line.
+    """
+    phase: dict[str, Any] = {**initial, "since": time.time()}
+
+    def emit(event: str, data: dict) -> None:
+        # Called from the worker thread. Only this thread writes and only the
+        # reporter reads, and dict updates are atomic under the GIL, so the
+        # handoff needs no lock.
+        phase.update(data)
+        phase["event"] = event
+        phase["since"] = time.time()
+
+    async def reporter() -> None:
+        while True:
+            await anyio.sleep(_POLL_SECONDS)
+            await _notify(ctx, *describe(phase))
+
+    result: Any = None
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(reporter)
+        try:
+            result = await anyio.to_thread.run_sync(lambda: work(emit))
+        finally:
+            tg.cancel_scope.cancel()
+    return result
 
 
 # --- discovery --------------------------------------------------------------
@@ -160,8 +249,9 @@ def workflow_create(
 
 
 @mcp.tool()
-def workflow_iterate(
+async def workflow_iterate(
     run_id: str,
+    ctx: Context,
     carry_session: bool = False,
     worker_timeout: int = 1800,
     review_timeout: int = 1200,
@@ -170,7 +260,8 @@ def workflow_iterate(
 
     This is the primary driver: call it, read the score and findings, tell the
     user, call it again. Findings from the last review are folded into the next
-    brief automatically.
+    brief automatically. Progress is reported while it runs, so a long cycle is
+    not silent.
 
     Args:
         run_id: From workflow_create.
@@ -181,11 +272,38 @@ def workflow_iterate(
         worker_timeout: Seconds before the worker is killed.
         review_timeout: Seconds before the reviewer is killed.
     """
-    return loop.iterate(
-        run_id,
-        carry_session=carry_session,
-        worker_timeout=worker_timeout,
-        review_timeout=review_timeout,
+    state = rundir.read_state(run_id)
+    n = len(state.iterations) + 1
+    total = float(state.max_iterations)
+    # Resolved up front: the loop's review events do not carry a backend name,
+    # and when reviewer_backend is None the reviewer is only decided at run time.
+    reviewer = adapters.pick_reviewer(state.worker_backend, state.reviewer_backend)
+
+    def describe(phase: dict[str, Any]) -> tuple[float, float | None, str]:
+        i = phase.get("iteration", n)
+        role = "review" if str(phase.get("event", "")).startswith("review") else "worker"
+        backend = reviewer if role == "review" else state.worker_backend
+        line = _status_line(
+            rundir.iteration_dir(run_id, i, role),
+            phase["since"],
+            f"iter {i}/{int(total)}",
+            f"{role} {backend or ''}".strip(),
+        )
+        # Half-steps so the bar still advances when the worker hands off to the
+        # reviewer inside a single iteration.
+        return (i - 1 + (0.5 if role == "review" else 0.0), total, line)
+
+    return await _with_progress(
+        ctx,
+        lambda emit: loop.iterate(
+            run_id,
+            carry_session=carry_session,
+            worker_timeout=worker_timeout,
+            review_timeout=review_timeout,
+            on_event=emit,
+        ),
+        describe,
+        {"iteration": n, "backend": state.worker_backend, "event": "worker.start"},
     )
 
 
@@ -304,9 +422,10 @@ def workflow_diff(run_id: str, iteration: int | None = None, max_chars: int = 60
 
 
 @mcp.tool()
-def delegate(
+async def delegate(
     task: str,
     cwd: str,
+    ctx: Context,
     backend: str = "codex",
     acceptance_criteria: str = "",
     model: str | None = None,
@@ -345,14 +464,30 @@ def delegate(
 
     snap = rundir.snapshot(cwd_path)
     rundir.ledger(run_id, "delegate.start", backend=backend, model=model, read_only=read_only)
-    result = adapter.run(
-        prompt=brief.render(),
-        cwd=cwd_path,
-        out_dir=out_dir,
-        model=model,
-        read_only=read_only,
-        resume=resume,
-        timeout=timeout,
+
+    def describe(phase: dict[str, Any]) -> tuple[float, float | None, str]:
+        line = _status_line(
+            out_dir,
+            phase["since"],
+            " ".join(x for x in (backend, model) if x),
+            "read-only" if read_only else "",
+        )
+        # Elapsed against the timeout: the only budget a single worker run has.
+        return (min(time.time() - phase["since"], timeout), float(timeout), line)
+
+    result = await _with_progress(
+        ctx,
+        lambda _emit: adapter.run(
+            prompt=brief.render(),
+            cwd=cwd_path,
+            out_dir=out_dir,
+            model=model,
+            read_only=read_only,
+            resume=resume,
+            timeout=timeout,
+        ),
+        describe,
+        {"backend": backend},
     )
     diff, files = rundir.capture_diff(cwd_path, snap)
     (out_dir / "diff.patch").write_text(diff)

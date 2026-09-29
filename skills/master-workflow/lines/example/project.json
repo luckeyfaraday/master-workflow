@@ -9,6 +9,8 @@
   "tagPrefix": "toy",
   "evidenceDir": "shots",
   "mergePort": 7990,
+  "anchorsDir": "docs/anchors",
+  "playtest": { "serve": "npm run dev -- --port 8080", "checks": ["npm test", "npm run build"] },
   "lines": "lines.json",
   "log": { "file": ".master-workflow/log.json", "entries": ".master-workflow/entries" },
   "context": "Other lines work at the same time, each in its own worktree; another line's work reaches you only through main, once it has passed review.",

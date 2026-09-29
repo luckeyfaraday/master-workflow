@@ -1,22 +1,25 @@
 export const meta = {
   name: 'run-lines',
-  description: 'Drive every line of a build to its bar: fresh worker, fresh reviewer with a findings ledger, keep the best round, rethink then pause on stalls, merge passes one at a time',
+  description: 'Drive every line of a build to its bar: fresh worker, fresh reviewer with a findings ledger, keep the best round, rethink then stop for your decision on stalls, merge one at a time, playtest after each wave',
   whenToUse: 'A master-workflow build with several lines of work (tracks, assets, features), each in its own git worktree; args come from lines.mjs args',
   phases: [
     { title: 'Work', detail: 'fresh worker per round: starts from the best round, merges main, fixes the open findings' },
     { title: 'Review', detail: 'fresh reviewer: settles every open finding, compares with the best round, at most 3 new blocking findings' },
     { title: 'Rethink', detail: 'after two rounds without improvement: an experiment on a scratch branch and a new plan' },
-    { title: 'Merge', detail: 'passed or accepted lines merge into main one at a time' },
-    { title: 'Log', detail: 'records a paused line in the progress log' },
+    { title: 'Merge', detail: 'passed or accepted lines (and asset lines whenever they get better) merge into main one at a time' },
+    { title: 'Decide', detail: 'a stopped line waits for the user\'s decision while the other lines go on' },
+    { title: 'Playtest', detail: 'when a wave is merged: checks main and gets it ready for the user to play' },
   ],
 }
 
-// args (from lines.mjs args): { kit, project, limit, limitWhy, done: [line ids already merged], lines: [{ ...line, state }] }
+// args (from lines.mjs args): { kit, project, limit, limitWhy, done: [line ids already merged], lines: [{ ...line, state }],
+//   wave, playtest: { wave } when this run finishes a wave that ends in a playtest }
 const P = args.project
 const KIT = args.kit
 const LIMIT = Math.max(1, args.limit || 1)
 const MAIN = P.main || 'main'
 const DONE = new Set(args.done || [])
+const WAIT_HOURS = P.decisionWaitHours === undefined ? 8 : P.decisionWaitHours
 
 // ---- state machine (lines.mjs evaluates this block to replay the log: keep it free of workflow globals) ----
 const STALL_RETHINK = 2 // rounds without a better result before a rethink
@@ -25,7 +28,7 @@ const STALL_PAUSE = 3   // rounds without a better result before the line stops 
 function initState(s) {
   s = s || {}
   return {
-    round: s.round || 0, head: s.head || null, best: s.best || null,
+    round: s.round || 0, head: s.head || null, best: s.best || null, mergedCommit: s.mergedCommit || null,
     ledger: s.ledger || [], nextId: s.nextId || 1, minor: s.minor || [], rules: s.rules || [],
     stall: s.stall || 0, strategy: s.strategy || '', history: s.history || [],
     pending: s.pending || null, restart: s.restart || null,
@@ -40,7 +43,9 @@ function applyWork(st, work) {
 
 // One review settles the open findings by id, adds the new blocking ones, and moves the best round.
 // A line passes when no hard rule fails, no finding is open and every criterion (C1..Cn) is met.
-function applyReview(st, review, round, commit, lineId, criteria) {
+// baseline: the line improves something main already has (an asset over its stand-in), so even its first round is
+// compared with main, and only a better round becomes its best.
+function applyReview(st, review, round, commit, lineId, criteria, baseline) {
   const s = { ...st, ledger: [], history: st.history.slice() }
   const said = new Map((review.previous || []).map(p => [p.id, p]))
   for (const f of st.ledger) {
@@ -56,7 +61,8 @@ function applyReview(st, review, round, commit, lineId, criteria) {
   const met = new Set((review.checklist || []).filter(c => c.met).map(c => (String(c.criterion).match(/C\d+/) || [''])[0]))
   const unmet = (criteria || []).map((_, i) => 'C' + (i + 1)).filter(l => !met.has(l))
   const passed = s.rules.length === 0 && s.ledger.length === 0 && unmet.length === 0
-  const compare = !st.best ? 'first' : ['better', 'same', 'worse'].includes(review.compare) ? review.compare : 'same'
+  const said3 = ['better', 'same', 'worse'].includes(review.compare) ? review.compare : 'same'
+  const compare = !st.best && !baseline ? 'first' : said3
   s.round = round
   s.head = commit
   s.pending = null
@@ -67,7 +73,7 @@ function applyReview(st, review, round, commit, lineId, criteria) {
     s.restart = null
   } else {
     s.stall = st.stall + 1
-    s.restart = compare === 'worse' ? s.best.commit : null // the next worker starts from the best round again
+    s.restart = compare === 'worse' && s.best ? s.best.commit : null // the next worker starts from the best round again
   }
   s.next = passed ? 'merge' : s.stall >= STALL_PAUSE ? 'pause' : s.stall === STALL_RETHINK ? 'rethink' : 'work'
   s.status = passed ? 'passed' : s.next === 'pause' ? 'paused' : 'active'
@@ -78,14 +84,21 @@ function applyRethink(st, plan) {
   return { ...st, strategy: plan || st.strategy, next: st.pending ? 'review' : 'work' }
 }
 
-// The user's decisions (lines.mjs decide), and the merge that ends a line.
+// A merge into main: final ends the line; otherwise (a line that merges whenever it gets better) it goes on.
+function applyMerge(st, commit, final) {
+  return final ? { ...st, mergedCommit: commit, status: 'merged', next: 'done' } : { ...st, mergedCommit: commit }
+}
+
+// The user's decisions (lines.mjs decide).
 function applyDecision(st, decision, note) {
-  if (decision === 'continue') return { ...st, status: 'active', stall: 0, next: st.pending ? 'review' : 'work', strategy: note ? `The user looked at the stalled line and decided to continue: ${note}` : st.strategy }
+  const next = st.pending ? 'review' : 'work'
+  if (decision === 'continue') return { ...st, status: 'active', stall: 0, next, strategy: note ? `The user looked at the stalled line and decided to continue: ${note}` : st.strategy }
+  if (decision === 'reopen') return { ...st, status: 'active', stall: 0, next, strategy: note ? `The user reopened this line after playing the build: ${note}` : st.strategy }
   if (decision === 'accept') return st.best ? { ...st, status: 'accepted', next: 'merge' } : st
   if (decision === 'drop') return { ...st, status: 'dropped', next: 'done' }
   if (decision === 'hold') return st.status === 'held' ? st : { ...st, heldFrom: st.status, status: 'held' }
   if (decision === 'release') return st.status === 'held' ? { ...st, status: st.heldFrom || 'active', heldFrom: null } : st
-  if (decision === 'merged') return { ...st, status: 'merged', next: 'done' }
+  if (decision === 'merged') return applyMerge(st, st.best ? st.best.commit : st.mergedCommit, true)
   return st
 }
 // ---- end state machine ----
@@ -125,6 +138,14 @@ const MERGE = { type: 'object', properties: {
   commit: { type: 'string' }, summary: { type: 'string' }, checks: { type: 'string' }, ok: { type: 'boolean' },
 }, required: ['commit', 'summary', 'checks', 'ok'] }
 
+const DECISION = { type: 'object', properties: {
+  decision: { type: 'string', enum: ['continue', 'accept', 'drop', 'hold', 'reopen', 'none'] }, note: { type: 'string' },
+}, required: ['decision', 'note'] }
+
+const PLAYTEST = { type: 'object', properties: {
+  ok: { type: 'boolean' }, commit: { type: 'string' }, summary: { type: 'string' }, checks: { type: 'string' },
+}, required: ['ok', 'commit', 'summary', 'checks'] }
+
 // ---- prompts ----
 
 // {name} and {name+N} placeholders in the project's commands and rules
@@ -136,11 +157,12 @@ const numbered = (xs, p) => (xs || []).map((x, i) => `${p}${i + 1}. ${x}`).join(
 const hist = h => h.length ? h.map(x => `- round ${x.round}: ${x.score}/10, ${x.compare}, ${x.open} open, at ${x.commit}. ${x.verdict}`).join('\n') : '- none yet'
 const evidenceDir = (L, round) => `${L.cwd}/${P.evidenceDir}/${L.id}-review-r${round}`
 const ctxFor = (L, round, extra) => ({ cwd: L.cwd, port: L.port, line: L.id, round, root: P.root, branch: L.branch, main: MAIN, kit: KIT, evidence: evidenceDir(L, round), ...extra })
+const addCmd = entry => fill(P.log.add, { entry: `"${entry}"` })
 
 function logStep(L, round, kind, fields, ctx) {
   const entry = `${P.log.entries}/${L.id}-r${round}-${kind}.json`
   const base = JSON.stringify({ line: L.id, round, kind, ...(L.logFields || {}) })
-  return `Log it: write ${entry} as ${base.slice(0, -1)}, ${fill(fields, ctx)}} and run: ${fill(P.log.add, { entry: `"${entry}"` })}`
+  return `Log it: write ${entry} as ${base.slice(0, -1)}, ${fill(fields, ctx)}} and run: ${addCmd(entry)}`
 }
 
 function about(L, role) {
@@ -165,6 +187,7 @@ function workerPrompt(L, st) {
     : `Start the round with git merge ${MAIN} (${MAIN} collects everything that has passed; resolve conflicts keeping both sides' intent and commit the merge).`
   const open = st.ledger.length ? `Open findings, by id. Fix every one, or dispute it in disputes (its id and your evidence) if you are sure it is wrong; the next reviewer settles each one by id:\n${st.ledger.map(f => `- ${f.id} [${f.criterion}] ${f.finding}${f.done ? ` Done looks like: ${f.done}` : ''}${f.status === 'worse' ? ' (it got worse last round)' : ''}`).join('\n')}` : ''
   const rules = st.rules.length ? `Hard rules that failed in the last review (fix these first):\n${st.rules.map(r => '- ' + r).join('\n')}` : ''
+  const merged = L.merge === 'on-better' && st.mergedCommit ? `Round ${st.best.round} is already in ${MAIN} (this line merges whenever a round is better than what ${MAIN} has); build on it.` : ''
   return `${about(L, 'the worker')} Work only in ${L.cwd} (branch ${L.branch}); cd there for every command. Other lines work in their own worktrees at the same time: never change anything outside ${L.cwd}.
 
 ${shared(L, ctx)}
@@ -173,7 +196,7 @@ ${start}
 
 This is round ${round}. Previous rounds:
 ${hist(st.history)}
-${st.best ? `The best round so far is round ${st.best.round} at ${st.best.commit} (${st.best.score}/10).` : ''}
+${st.best ? `The best round so far is round ${st.best.round} at ${st.best.commit} (${st.best.score}/10). ${merged}` : ''}
 ${[open, rules].filter(Boolean).join('\n\n')}
 ${st.strategy ? `\nA diagnosis of why this line stalled produced this plan. Follow it unless you find it is wrong:\n${st.strategy}\n` : ''}
 Rules:
@@ -195,9 +218,15 @@ function reviewerPrompt(L, st) {
   const ledger = st.ledger.length
     ? `Open findings from earlier reviews. Settle every one by id in previous: fixed, open, worse, or dropped (only when it was wrong or conflicts with the criteria; say why). Judge from your own evidence, not the worker's word:\n${st.ledger.map(f => `- ${f.id} [${f.criterion}] ${f.finding}${f.done ? ` Done looks like: ${f.done}` : ''}${disputes.has(f.id) ? `\n  The worker disputes it: ${disputes.get(f.id)}` : ''}`).join('\n')}`
     : 'There are no open findings from earlier reviews: previous is empty.'
-  const compare = !st.best
-    ? 'This is the first review of this line: set compare to "first".'
-    : `The best round so far is round ${st.best.round} at ${st.best.commit} (${st.best.score}/10)${st.best.evidence ? `; its review evidence is in ${st.best.evidence}` : ''}. Build your evidence with the same seeds, views and runs, and judge this round against it criterion by criterion. compare is "better" when this round is better overall and no criterion got worse, "worse" when it is worse overall, and "same" otherwise; explain it in compareNotes. Earlier reviews:\n${hist(st.history)}`
+  const compare = st.best
+    ? `The best round so far is round ${st.best.round} at ${st.best.commit} (${st.best.score}/10)${st.best.evidence ? `; its review evidence is in ${st.best.evidence}` : ''}. Build your evidence with the same seeds, views and runs, and judge this round against it criterion by criterion. compare is "better" when this round is better overall and no criterion got worse, "worse" when it is worse overall, and "same" otherwise; explain it in compareNotes. Earlier reviews:\n${hist(st.history)}`
+    : L.merge === 'on-better'
+      ? `This line improves something ${MAIN} already has (a stand-in or an earlier version). Build the same evidence on ${MAIN} (for example from ${P.root}) and judge this round against it: compare is "better" when this round is better overall, "worse" when it is worse, and "same" otherwise; explain it in compareNotes. A better round is merged into ${MAIN} at once.`
+      : 'This is the first review of this line: set compare to "first".'
+  const anchors = (L.anchors || []).length
+    ? `The user's calibration for this line: open these images before you score. ${L.anchors.map(a => `${a.path} is a ${a.score}/10${a.note ? ` (${a.note})` : ''}`).join('; ')}. Score on that scale.`
+    : ''
+  const threshold = L.threshold || P.threshold
   return `${about(L, 'an independent reviewer')} The work is in ${L.cwd} (branch ${L.branch}) at commit ${work.commit}. You did not write it and owe it nothing. Judge only what is in the repo and what running it shows, never anyone's description of it.
 
 ${shared(L, ctx)}
@@ -215,7 +244,7 @@ Rules:
 ${bullets([...(P.rules || []), ...(P.reviewerRules || [])], ctx)}
 - Do not modify, create or delete any tracked file, and do not commit.
 
-Scoring: score 1-10 for the history. A score below ${L.threshold || P.threshold} needs at least one finding that is still open or new; if nothing blocks, the score is at least ${L.threshold || P.threshold}. A hard-rule failure caps the score at 6. Be strict, and be consistent with the best round's review.
+Scoring: score 1-10 for the history. A score below ${threshold} needs at least one finding that is still open or new; if nothing blocks, the score is at least ${threshold}. A hard-rule failure caps the score at 6. Be strict, and be consistent with the best round's review.${anchors ? '\n' + anchors : ''}
 If compare is "first" or "better", create an empty file named BEST in ${ev}.
 
 ${logStep(L, round, 'review', `"score": N, "verdict": "...", "compare": "...", "compareNotes": "...", "previous": [...], "newBlocking": [...], "newMinor": [...], "checklist": [...], "ruleFailures": [...], "strengths": [...], "findings": ["<id or new>: <text> for every finding still open after your review"], "commit": "${work.commit}", "evidenceDir": "${ev}"${P.log.reviewFields ? ', ' + P.log.reviewFields : ''}`, ctx)}
@@ -225,7 +254,8 @@ Return the score, a one-line verdict, compare and compareNotes, previous, newBlo
 
 function rethinkPrompt(L, st) {
   const ctx = ctxFor(L, st.round), scratch = `${L.branch}-rethink-r${st.round}`
-  return `Line ${L.id}, "${L.name}", of ${P.about} has not improved for ${st.stall} rounds: the best is still round ${st.best.round} at ${st.best.commit} (${st.best.score}/10). Worktree ${L.cwd}, branch ${L.branch}. Other lines work in their own worktrees: change nothing outside ${L.cwd}.
+  const best = st.best ? `the best is still round ${st.best.round} at ${st.best.commit} (${st.best.score}/10)` : `no round has beaten what ${MAIN} has yet`
+  return `Line ${L.id}, "${L.name}", of ${P.about} has not improved for ${st.stall} rounds: ${best}. Worktree ${L.cwd}, branch ${L.branch}. Other lines work in their own worktrees: change nothing outside ${L.cwd}.
 
 ${shared(L, ctx)}
 
@@ -248,37 +278,74 @@ ${bullets(P.rules, ctx)}
 Return the diagnosis, what you tried, the branch and commit, what it showed, and the plan.`.replace(/\{port(\+\d+)?\}/g, m => fill(m, ctx))
 }
 
-function mergePrompt(L, st) {
+function mergePrompt(L, st, final) {
   const ctx = ctxFor(L, st.round, { cwd: P.root, port: P.mergePort || L.port })
-  const how = st.status === 'accepted' ? `accepted by the user at ${st.best.score}/10` : `passed review at ${st.best.score}/10`
-  return `In ${P.root} (branch ${MAIN}), merge line ${L.id}, "${L.name}", of ${P.about}: commit ${st.best.commit}, round ${st.best.round}, ${how}. Run git -C ${P.root} merge --no-ff ${st.best.commit} with a message like "Merge line ${L.id}, ${L.name} (${how})"${P.trailer ? ` ending with the line: ${P.trailer}` : ''}.
+  const how = !final ? `better than what ${MAIN} has (round ${st.best.round}, ${st.best.score}/10); the line keeps improving after this merge`
+    : st.status === 'accepted' ? `accepted by the user at ${st.best.score}/10` : `passed review at ${st.best.score}/10`
+  return `In ${P.root} (branch ${MAIN}), merge line ${L.id}, "${L.name}", of ${P.about}: commit ${st.best.commit}, round ${st.best.round}, ${how}. Run git -C ${P.root} merge --no-ff ${st.best.commit} with a message like "Merge line ${L.id}, ${L.name} (round ${st.best.round}, ${st.best.score}/10)"${P.trailer ? ` ending with the line: ${P.trailer}` : ''}.
 If there are conflicts, resolve them keeping both sides' intent (${MAIN} holds other passed work). Then check ${MAIN} in ${P.root}:
 ${bullets(P.checks.merge, ctx)}
 If a check fails because of the merge, fix it in a follow-up commit on ${MAIN}.
 ${bullets(P.rules, ctx)}
-- ${logStep(L, st.round, 'merge', `"commit": "<merge commit>", "merged": "${st.best.commit}", "summary": "..."`, ctx)}
+- ${logStep(L, st.round, 'merge', `"commit": "<merge commit>", "merged": "${st.best.commit}", "final": ${final}, "summary": "..."`, ctx)}
 
 Return the merge commit, what you resolved, the check results, and ok: true only when every check passes.`
 }
 
-function pausePrompt(L, st) {
+// Logs the stop, then waits for the user's decision (lines.mjs decide), so the line can go on in this same run.
+function stopPrompt(L, st) {
   const entry = `${P.log.entries}/${L.id}-r${st.round}-pause.json`
+  const best = st.best ? `The best is round ${st.best.round} at ${st.best.score}/10.` : `No round has beaten what ${MAIN} has yet.`
   const json = JSON.stringify({ line: L.id, round: st.round, kind: 'pause', ...(L.logFields || {}),
-    summary: `Stopped after ${st.stall} rounds without improvement. The best is round ${st.best.round} at ${st.best.score}/10. It needs the user's decision: accept the best round, continue with a new direction, or drop the line.`,
-    commit: st.best.commit, findings: st.ledger.map(f => `${f.id}: ${f.finding}`) })
-  return `Write this JSON, exactly as given, to ${entry}, then run: ${fill(P.log.add, { entry: `"${entry}"` })}
-Change nothing else, and return "ok".
-${json}`
+    summary: `Stopped after ${st.stall} rounds without improvement. ${best} It needs the user's decision: accept the best round, continue with a new direction, or drop the line.`,
+    commit: st.best ? st.best.commit : undefined, findings: st.ledger.map(f => `${f.id}: ${f.finding}`) })
+  const wait = `node "${KIT}/lines.mjs" wait "${P.file}" --line ${L.id} --kinds decision --after-last pause --minutes 9`
+  const tries = Math.max(1, Math.ceil(WAIT_HOURS * 60 / 9))
+  if (!WAIT_HOURS) return `Write this JSON, exactly as given, to ${entry}, then run: ${addCmd(entry)}
+${json}
+Change nothing else, and return decision "none" with an empty note.`
+  return `1. Write this JSON, exactly as given, to ${entry}, then run: ${addCmd(entry)}
+${json}
+2. Then wait for the user's decision on line ${L.id}: run ${wait}
+It prints the decision as JSON when the user makes it, or TIMEOUT after 9 minutes. On TIMEOUT run it again, up to ${tries} times in all.
+3. Change nothing else. Return the decision and its note as printed, or decision "none" if every try timed out.`
+}
+
+function playtestPrompt(wave, merged) {
+  const pt = P.playtest, ctx = { root: P.root, main: MAIN, wave, port: pt.port || 8080 }
+  const entry = `${P.log.entries}/playtest-w${wave}-ready.json`
+  return `Wave ${wave} of ${P.about} is merged into ${MAIN}: ${merged.map(r => `${r.id} (${r.name}, round ${r.best ? r.best.round : '-'}, ${r.best ? r.best.score : '-'}/10)`).join(', ')}. Get ${MAIN} ready for the user to play:
+1. In ${P.root} on ${MAIN}, run these checks:
+${bullets(pt.checks || P.checks.merge, ctx)}
+If a check fails, fix it in a commit on ${MAIN}.
+2. Tag the build: git -C ${P.root} tag -f ${P.tagPrefix}/playtest-w${wave} ${MAIN}
+3. Do not start the game for the user; the session does that when they are ready to play.
+${bullets(P.rules, ctx)}
+4. Log it: write ${entry} as ${JSON.stringify({ line: 'playtest', kind: 'playtest-ready', wave, ...(pt.logFields || {}) }).slice(0, -1)}, "summary": "<what this build adds for the player to try, in plain words, and how the checks went>", "command": "${fill(pt.serve || '', ctx)}", "commit": "<${MAIN}'s commit>"} and run: ${addCmd(entry)}
+
+Return ok (every check passed), ${MAIN}'s commit, the summary and the check results.`
 }
 
 // ---- scheduling ----
 
+// how many lines wait on each line, directly or through others: a free agent slot goes to the line most wait on
+const PRIO = {}
+function dependents(id, seen = new Set()) {
+  for (const L of args.lines) if ((L.after || []).includes(id) && !seen.has(L.id)) { seen.add(L.id); dependents(L.id, seen) }
+  return seen
+}
+for (const L of args.lines) PRIO[L.id] = dependents(L.id).size
+
 // at most LIMIT agents at once across every line (lines.mjs sets it from the machine's free memory and disk)
-let active = 0
+let active = 0, ticket = 0
 const waiting = []
-async function run(prompt, opts) {
-  if (active >= LIMIT) await new Promise(r => waiting.push(r)); else active++
-  try { return await agent(prompt, opts) } finally { const w = waiting.shift(); if (w) w(); else active-- }
+async function run(prompt, opts, prio = 0) {
+  if (active >= LIMIT) await new Promise(r => waiting.push({ r, prio, n: ticket++ })); else active++
+  try { return await agent(prompt, opts) } finally {
+    waiting.sort((a, b) => b.prio - a.prio || a.n - b.n)
+    const w = waiting.shift()
+    if (w) w.r(); else active--
+  }
 }
 
 // merges into main one at a time
@@ -295,8 +362,15 @@ function finish(L, st, status, note) {
   return r
 }
 
+async function mergeBest(L, st, final, prio) {
+  const m = await serially(() => run(mergePrompt(L, st, final), { label: `${L.id} merge r${st.best.round}`, phase: 'Merge', schema: MERGE, effort: 'high' }, prio + 100))
+  if (m && m.ok) log(`${L.id}: round ${st.best.round} merged into ${MAIN} at ${m.commit}${final ? '' : ' (the line goes on)'}`)
+  return m && m.ok ? m : null
+}
+
 async function runLine(L) {
   let st = initState(L.state)
+  const prio = PRIO[L.id] || 0, onBetter = L.merge === 'on-better'
   for (const d of L.after || []) {
     if (DONE.has(d)) continue
     const r = gate[d] ? await gate[d].promise : null
@@ -306,37 +380,46 @@ async function runLine(L) {
   for (;;) {
     if (['held', 'dropped', 'merged'].includes(st.status)) return finish(L, st, st.status)
     if (st.next === 'pause') {
-      await run(pausePrompt(L, st), { label: `${L.id} pause`, phase: 'Log', effort: 'low' })
-      log(`${L.id} stopped: ${st.stall} rounds without improvement, best ${st.best.score}/10 in round ${st.best.round}. Needs your decision.`)
-      return finish(L, st, 'needs-decision', `best round ${st.best.round} at ${st.best.commit}`)
+      log(`${L.id} stopped: ${st.stall} rounds without improvement${st.best ? `, best ${st.best.score}/10 in round ${st.best.round}` : ''}. It needs your decision (lines.mjs decide).`)
+      // the wait takes no agent slot: it is a command that sleeps until the log has the decision
+      const d = await agent(stopPrompt(L, st), { label: `${L.id} waits for your decision`, phase: 'Decide', schema: DECISION, effort: 'low' })
+      if (!d || !WAIT_HOURS || d.decision === 'none') return finish(L, st, 'needs-decision', st.best ? `best round ${st.best.round} at ${st.best.commit}` : 'no round beat main')
+      log(`${L.id}: your decision: ${d.decision}${d.note ? ` (${d.note})` : ''}`)
+      st = applyDecision(st, d.decision, d.note)
+      continue
     }
     if (st.next === 'merge') {
-      if (L.onMain) return finish(L, applyDecision(st, 'merged'), 'merged', 'worked on main')
-      const m = await serially(() => run(mergePrompt(L, st), { label: `${L.id} merge`, phase: 'Merge', schema: MERGE, effort: 'high' }))
-      if (!m || !m.ok) return finish(L, st, 'merge-failed', m ? m.checks : 'the merge agent died')
-      log(`${L.id} merged into ${MAIN} at ${m.commit}`)
-      return finish(L, applyDecision(st, 'merged'), 'merged', m.commit)
+      if (L.onMain) return finish(L, applyMerge(st, st.best.commit, true), 'merged', 'worked on main')
+      if (st.mergedCommit && st.mergedCommit === st.best.commit) return finish(L, applyMerge(st, st.best.commit, true), 'merged', `round ${st.best.round} was already merged`)
+      const m = await mergeBest(L, st, true, prio)
+      if (!m) return finish(L, st, 'merge-failed', 'the merge or its checks failed')
+      return finish(L, applyMerge(st, st.best.commit, true), 'merged', m.commit)
     }
     if (st.next === 'rethink') {
-      const r = await run(rethinkPrompt(L, st), { label: `${L.id} rethink r${st.round}`, phase: 'Rethink', schema: RETHINK, effort: 'xhigh' })
+      const r = await run(rethinkPrompt(L, st), { label: `${L.id} rethink r${st.round}`, phase: 'Rethink', schema: RETHINK, effort: 'xhigh' }, prio)
       if (r) log(`${L.id} rethink: ${r.diagnosis}`)
       st = applyRethink(st, r ? r.plan : '') // the plan carries what the experiment showed; the log records the same text
       continue
     }
     if (!st.pending) {
-      const w = await run(workerPrompt(L, st), { label: `${L.id} work r${st.round + 1}`, phase: 'Work', schema: WORK, effort: 'high' })
+      const w = await run(workerPrompt(L, st), { label: `${L.id} work r${st.round + 1}`, phase: 'Work', schema: WORK, effort: 'high' }, prio)
       if (!w) { if (++dead >= 3) return finish(L, st, 'failed', 'three agents in a row died'); continue }
       dead = 0
       st = applyWork(st, w)
     }
     const round = st.round + 1
-    const rv = await run(reviewerPrompt(L, st), { label: `${L.id} review r${round}`, phase: 'Review', schema: REVIEW, effort: 'high' })
+    const rv = await run(reviewerPrompt(L, st), { label: `${L.id} review r${round}`, phase: 'Review', schema: REVIEW, effort: 'high' }, prio)
     if (!rv) { if (++dead >= 3) return finish(L, st, 'failed', 'three agents in a row died'); continue } // the same commit is reviewed again
     dead = 0
-    const out = applyReview(st, { ...rv, newBlocking: (rv.newBlocking || []).slice(0, 3) }, round, st.pending.commit, L.id, L.criteria)
+    const out = applyReview(st, { ...rv, newBlocking: (rv.newBlocking || []).slice(0, 3) }, round, st.pending.commit, L.id, L.criteria, onBetter)
     st = out.state
     const h = st.history[st.history.length - 1]
     log(`${L.id} round ${round}: ${rv.score}/10, ${h.compare}, ${st.ledger.length} open${out.unmet.length ? `, ${out.unmet.join(' ')} unmet` : ''}${out.passed ? ', passed' : ''}. ${rv.verdict}`)
+    // a line that improves what main has merges every better round at once, so everything else builds on it
+    if (onBetter && !out.passed && st.best && st.best.commit !== st.mergedCommit) {
+      const m = await mergeBest(L, st, false, prio)
+      if (m) st = applyMerge(st, st.best.commit, false)
+    }
   }
 }
 
@@ -344,10 +427,24 @@ async function guarded(L) {
   try { return await runLine(L) } catch (e) { return finish(L, initState(L.state), 'error', String(e && e.message || e)) }
 }
 
-log(`${args.lines.length} line${args.lines.length === 1 ? '' : 's'}, at most ${LIMIT} agent${LIMIT === 1 ? '' : 's'} at once${args.limitWhy ? ` (${args.limitWhy})` : ''}`)
+log(`${args.lines.length} line${args.lines.length === 1 ? '' : 's'}${args.wave ? ` of wave ${args.wave}` : ''}, at most ${LIMIT} agent${LIMIT === 1 ? '' : 's'} at once${args.limitWhy ? ` (${args.limitWhy})` : ''}`)
 const results = (await parallel(args.lines.map(L => () => guarded(L)))).filter(Boolean)
+
+// a wave that ends in a playtest: once every line of it is merged (or dropped), main is the build the user plays.
+// args.playtest.lines lists the whole wave, including lines merged in earlier runs.
+let playtest = null
+if (P.playtest && args.playtest && results.every(r => r.status === 'merged' || r.status === 'dropped')) {
+  const byId = new Map((args.playtest.lines || []).map(l => [l.id, l]))
+  for (const r of results) byId.set(r.id, r)
+  const merged = [...byId.values()].filter(r => r.status === 'merged')
+  const pt = await run(playtestPrompt(args.playtest.wave, merged), { label: `playtest wave ${args.playtest.wave}`, phase: 'Playtest', schema: PLAYTEST, effort: 'high' }, 1000)
+  playtest = { wave: args.playtest.wave, ready: !!(pt && pt.ok), commit: pt ? pt.commit : null, summary: pt ? pt.summary : 'the playtest agent died', command: P.playtest.serve || '' }
+  log(playtest.ready ? `Wave ${playtest.wave} is ready to play: ${playtest.summary}` : `Wave ${playtest.wave}: the playtest build is not ready (${playtest.summary})`)
+}
+
 return {
   lines: results,
   needsDecision: results.filter(r => r.status === 'needs-decision').map(r => r.id),
   merged: results.filter(r => r.status === 'merged').map(r => r.id),
+  playtest,
 }

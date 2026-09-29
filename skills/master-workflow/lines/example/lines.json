@@ -27,5 +27,22 @@
     ],
     "after": ["menu"],
     "notes": "The menu's button sounds come from the menu line, so this line starts once it has merged."
+  },
+  {
+    "id": "hero",
+    "name": "Hero model",
+    "cwd": "../toy-wt/hero",
+    "branch": "line/hero",
+    "port": 7830,
+    "scope": "assets/src/hero.py and assets/hero/",
+    "criteria": [
+      "The hero reads as the character in docs/reference/hero.png from the game camera (tools/screens.mjs --only hero)",
+      "At most 8,000 triangles, and assets/src/hero.py rebuilds it byte for byte"
+    ],
+    "merge": "on-better",
+    "threshold": 8,
+    "wave": 2,
+    "notes": "Replaces the capsule stand-in wave 1 put in the game. Every round that beats what main has merges at once.",
+    "checks": { "review": ["node tools/screens.mjs --port {port} --only hero --out {evidence}", "node tools/tris.mjs assets/hero"] }
   }
 ]

@@ -308,6 +308,7 @@ export function check(p) {
     if (ranges[i].lo <= ranges[j].hi && ranges[j].lo <= ranges[i].hi) err(`${ranges[i].id} and ${ranges[j].id} share ports (each takes port..port+9)`);
   for (const b of p.briefs || []) if (!fs.existsSync(path.resolve(p.root, b))) err(`brief ${b} is missing`);
   if (git(p, 'rev-parse', '--verify', '--quiet', `refs/heads/${p.main}`).status !== 0) err(`${p.root} has no branch ${p.main}`);
+  const finished = new Set(plan(p).rows.filter(r => FINISHED.has(r.state.status)).map(r => r.L.id)); // their worktrees may be gone
   for (const L of p.lines) {
     if (!L.criteria.length) err(`${L.id} has no criteria`);
     else if (!L.criteria.some(c => MEASURABLE.test(c))) warn(`${L.id} has no measurable criterion (a number, a test, an exit code): lines judged only by their looks stall`);
@@ -317,7 +318,7 @@ export function check(p) {
       if (!D) warn(`${L.id} waits for ${d}, which is not a line here (fine only if it is already merged)`);
       else if (D.wave > L.wave) err(`${L.id} (wave ${L.wave}) waits for ${d}, which is in the later wave ${D.wave}`);
     }
-    if (L.onMain) continue;
+    if (L.onMain || finished.has(L.id)) continue;
     if (!fs.existsSync(L.cwd)) { warn(`${L.id}: the worktree ${L.cwd} does not exist yet (git worktree add ${L.cwd} -b ${L.branch})`); continue; }
     const head = spawnSync('git', ['-C', L.cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' });
     if (head.status !== 0) err(`${L.id}: ${L.cwd} is not a git worktree`);

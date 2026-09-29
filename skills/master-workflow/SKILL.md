@@ -203,27 +203,42 @@ hours, do not start one loop per line. Use the lines kit in `lines/` next to thi
 reviewer's independence comes from its clean context, the findings list and the comparison with the best round.
 
 1. **Write `project.json` and `lines.json`.** Every line gets numbered criteria a stranger could check, and at least
-   one measurable check (numbers, test results, renders), not only "looks like the reference". Show them to the user
-   and stop, as in step 1 above.
-2. **Check the machine.** `node lines/lines.mjs limits <project>` says how many agents can run at once and what
-   limits it. Tell the user; if disk or memory is the limit, say what to free.
-3. **Install the restart hook.** Add `node "<kit>/lines.mjs" status "<project>" --hook` as a SessionStart hook
+   one measurable check (numbers, test results, renders), not only "looks like the reference". Put the setup in
+   wave 1: the foundation, and a stand-in for every asset, so no track waits for an asset; asset lines use
+   `"merge": "on-better"` and later waves build on them. Add a `playtest` section so the user plays the build after
+   each wave. Run `lines.mjs check <project>`, fix its errors, then show the plan to the user and stop, as in step 1.
+2. **Calibrate the lines judged by their looks.** `lines.mjs calibrate <project> <line> --candidates` lists images;
+   show the user three and ask which is a 6, an 8 and a 9, then record them (`calibrate <project> <line> 6=... 8=...
+   9=...`). Every reviewer of that line scores on that scale. Such lines can pass at `"threshold": 8`: the playtest
+   is where the user confirms them.
+3. **Check the machine.** `lines.mjs limits <project>` says how many agents can run at once and what limits it. Tell
+   the user; if disk or memory is the limit, say what to free.
+4. **Install the restart hook.** Add `node "<kit>/lines.mjs" status "<project>" --hook` as a SessionStart hook
    (matcher `startup|resume|compact|clear`) in the project's `.claude/settings.json`, so a session that starts,
-   resumes or compacts knows which lines were interrupted and how to resume them.
-4. **Launch one workflow.** `node lines/lines.mjs args <project> > args.json`, then
+   resumes or compacts knows what is interrupted, waiting for a decision, or ready to play.
+5. **Launch one workflow.** `lines.mjs args <project> > args.json`, then
    `Workflow({ scriptPath: "<kit>/run-lines.js", args: <that JSON> })`. Never one workflow per line: they could not
-   share the machine's limit.
-5. **Report as it runs.** Relay each round's line (score, better/same/worse, open findings). Heavy commands in the
-   project (Blender, browsers, renders) go through `lines/slot.mjs` or the project's own queue.
-6. **Stops come to the user.** A line that stalls three rounds returns `needs-decision`. Show the user the best
-   round's evidence and ask: accept it, continue with a direction, or drop it. Record the answer with
-   `lines.mjs decide <project> <line> accept|continue|drop "<their words>"`, then relaunch with `args <project> <line>`.
-7. **Verify before you report done,** as in step 5 above: read what merged into main and run the project's checks.
+   share the machine's limit. Then run `lines.mjs wait <project>` in the background (Bash `run_in_background`): it
+   exits, and so wakes you, only when a line stops for a decision or a build is ready to play. Re-arm it after
+   each event. Do not poll on a timer.
+6. **Report as it runs.** Relay each round's line (score, better/same/worse, open findings). Heavy commands in the
+   project (Blender, browsers, renders) go through `lines/slot.mjs` or the project's own queue; a watcher that caps
+   those pools when memory or disk runs low (`setCap`) is better than one that only warns.
+7. **Stops come to the user.** When a line stops, show the user the best round's evidence and ask: accept it,
+   continue with a direction, or drop it. Record the answer with
+   `lines.mjs decide <project> <line> accept|continue|drop "<their words>"`. The stopped line is waiting inside the
+   running workflow and picks the decision up by itself; relaunch only if the workflow has ended
+   (`args <project> <line>`).
+8. **Playtests.** When a wave's build is ready (the workflow returns `playtest`), start its `serve` command for the
+   user, and ask them to play it and give notes. Turn each note into a criterion of the line it is about, or a new
+   line, in `lines.json`; reopen merged lines that need work (`decide <line> reopen "<note>"`); record the playtest
+   (`lines.mjs playtest <project> <wave> "<notes>"`); then launch the next run.
+9. **Verify before you report done,** as in step 5 above: read what merged into main and run the project's checks.
 
 The loop's rules are in the script, not up to you: the reviewer settles every open finding by id and may add at most
 three new blocking ones, each tied to a criterion; a round judged worse sends the next worker back to the best
-commit; two stalls bring a rethink that tests its idea on a scratch branch; three stop the line; passed and accepted
-lines merge one at a time.
+commit; two stalls bring a rethink that tests its idea on a scratch branch; three stop the line for the user; passed
+and accepted lines merge one at a time; a free agent slot goes to the line others wait on.
 
 ## What not to do
 

@@ -245,6 +245,15 @@ model set the pace. What it changes:
 - **A crash loses nothing.** State is replayed from the progress log with the
   loop's own state machine, and a SessionStart hook tells the next session what to
   resume.
+- **You play it early.** Lines come in waves; after each one, main is readied for
+  you to play, and your notes become criteria (or reopen lines) before the next
+  wave starts. Asset lines merge every round that beats the stand-in, so tracks
+  never wait for them.
+- **Nobody babysits.** A stopped line waits for your decision inside the running
+  workflow; `lines.mjs wait` wakes the session only when you are needed.
+  Reviewers of lines judged by their looks score on reference images you picked
+  (`lines.mjs calibrate`), and `lines.mjs check` catches clashing ports, cycles
+  and lines with nothing measurable before anything runs.
 
 ```sh
 node skills/master-workflow/lines/lines.mjs status project.json   # where every line stands

@@ -6,6 +6,8 @@
 // A pool is a folder of tickets (one file per waiting or running process, named by its pid) in the temp dir; the
 // oldest --max tickets run. A ticket whose process has died is removed at the next check, so a killed agent
 // never holds a slot. Projects can queue on the same pool from their own code with acquire() below.
+// A watcher can throttle a pool without stopping anything: setCap(pool, n) (a file named .cap in the pool) lowers
+// how many run at once, for new starts, until setCap(pool, null) lifts it.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,6 +15,15 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 export const slotDir = pool => path.join(os.tmpdir(), 'master-workflow-slots', pool);
+
+export function readCap(pool) {
+  try { return Math.max(1, Math.floor(+fs.readFileSync(path.join(slotDir(pool), '.cap'), 'utf8'))) || Infinity; } catch { return Infinity; }
+}
+export function setCap(pool, n) {
+  const file = path.join(slotDir(pool), '.cap');
+  if (n == null) fs.rmSync(file, { force: true });
+  else { fs.mkdirSync(slotDir(pool), { recursive: true }); fs.writeFileSync(file, String(Math.max(1, Math.floor(n)))); }
+}
 
 const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -42,8 +53,9 @@ export async function acquire(pool, max = 2, { onWait, poll = 1000 } = {}) {
     const queue = tickets(dir);
     const at = queue.findIndex(q => q.pid === process.pid);
     if (at < 0) fs.writeFileSync(mine, String(Date.now())); // someone removed our ticket: take a new place
-    else if (at < max) return release;
-    if (onWait && i % Math.max(1, Math.round(30000 / poll)) === 0) onWait(at - max + 1, queue.length);
+    const room = Math.min(max, readCap(pool));
+    if (at >= 0 && at < room) return release;
+    if (onWait && i % Math.max(1, Math.round(30000 / poll)) === 0) onWait(at - room + 1, queue.length);
     await sleep(poll);
   }
 }

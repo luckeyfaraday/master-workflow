@@ -40,6 +40,10 @@ you ─▶ orchestrator ─▶ brief ─▶ worker CLI ─▶ git diff ─▶ re
   event streams, scores, and verdicts
 - **Session search** — fold decisions from past agent sessions (any backend)
   into the worker brief
+- **Lines builds** — drive many lines of a long build (tracks, assets,
+  features) at once in one Claude Code workflow, with a findings ledger, best-round
+  tracking, stall escalation to the user, a machine-wide agent limit, and state
+  replayed from the progress log after a crash ([Lines builds](#lines-builds))
 
 ## Why it is shaped like this
 
@@ -217,6 +221,36 @@ The reviewer is calibrated to be hard to please:
 
 A review that fails to emit its JSON verdict is capped below threshold — an
 unparsed review can never end the loop on its own.
+
+## Lines builds
+
+For a build with many lines of work, each in its own git worktree and running for
+hours, the skill ships a kit for Claude Code's Workflow tool in
+[`skills/master-workflow/lines/`](skills/master-workflow/lines/README.md). It came
+out of a two-day game build (34 lines, 450 agents) where most lines stalled at
+7–8/10, a crash stopped every loop for 12 hours, and the machine rather than the
+model set the pace. What it changes:
+
+- **The bar cannot move.** Findings get ids. Each reviewer settles every open one
+  (fixed, open, worse, dropped) and may add at most three new blocking findings,
+  each tied to a numbered criterion.
+- **Progress is kept.** Each round is compared with the best round so far; a round
+  judged worse sends the next worker back to the best commit.
+- **Stalls come to you.** Two rounds without improvement bring a rethink that tests
+  its idea on a scratch branch; a third stops the line and asks you to accept,
+  redirect, or drop it.
+- **The machine sets the limit.** One workflow runs every line, at most as many
+  agents at once as free memory and disk allow; heavy tools queue machine-wide
+  (`slot.mjs`).
+- **A crash loses nothing.** State is replayed from the progress log with the
+  loop's own state machine, and a SessionStart hook tells the next session what to
+  resume.
+
+```sh
+node skills/master-workflow/lines/lines.mjs status project.json   # where every line stands
+node skills/master-workflow/lines/lines.mjs args project.json     # args for the run-lines workflow
+node --test skills/master-workflow/lines/test/lines.test.mjs      # the loop under a mock Workflow runtime
+```
 
 ## Related projects
 

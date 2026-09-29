@@ -1,0 +1,32 @@
+{
+  "name": "Toy",
+  "about": "Toy, a small browser game",
+  "root": ".",
+  "main": "main",
+  "briefs": ["docs/BRIEF.md"],
+  "trailer": "Co-Authored-By: Claude <noreply@anthropic.com>",
+  "threshold": 9,
+  "tagPrefix": "toy",
+  "evidenceDir": "shots",
+  "mergePort": 7990,
+  "lines": "lines.json",
+  "log": { "file": ".master-workflow/log.json", "entries": ".master-workflow/entries" },
+  "context": "Other lines work at the same time, each in its own worktree; another line's work reaches you only through main, once it has passed review.",
+  "hardRules": [
+    "npm test passes",
+    "npm run build succeeds with no warnings",
+    "The page loads with no console errors"
+  ],
+  "rules": [
+    "Run node tools/screens.mjs through the browser queue: node ~/.claude/skills/master-workflow/lines/slot.mjs --pool browser --max 3 -- node tools/screens.mjs ...",
+    "Never search the whole disk; search only inside your worktree."
+  ],
+  "workerRules": ["Aim at what a player would expect from a polished game, not the minimum that passes a check."],
+  "reviewerRules": [],
+  "checks": {
+    "worker": ["npm test", "node tools/screens.mjs --port {port} --out shots/{line}-work, and open the screenshots that matter"],
+    "review": ["npm test", "node tools/screens.mjs --port {port} --out {evidence}, and open the screenshots that matter", "npm run build"],
+    "merge": ["npm test", "npm run build", "node tools/screens.mjs --port {port} --out shots/merge-{line}"]
+  },
+  "machine": { "maxLines": 3 }
+}

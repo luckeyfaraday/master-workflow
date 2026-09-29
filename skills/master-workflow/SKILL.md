@@ -1,6 +1,6 @@
 ---
 name: master-workflow
-description: Orchestrate a build as orchestrator → worker → critical reviewer, delegating to Codex, Grok, OpenCode, Claude, or Kimi and looping until an independent cross-model reviewer scores the diff 9/10. Use when the user says master-workflow, asks to delegate or offload work to another agent CLI, asks to run a review loop, wants work driven to a quality bar, or names a backend ("send this to Codex", "have Grok grind through it", "run it on OpenRouter").
+description: Orchestrate a build as orchestrator → worker → critical reviewer, delegating to Codex, Grok, OpenCode, Claude, or Kimi and looping until an independent cross-model reviewer scores the diff 9/10; for long builds with several lines of work in parallel worktrees, drive them all with the run-lines workflow. Use when the user says master-workflow, asks to delegate or offload work to another agent CLI, asks to run a review loop, wants work driven to a quality bar, wants several tracks, assets or features of a build driven in parallel, or names a backend ("send this to Codex", "have Grok grind through it", "run it on OpenRouter").
 ---
 
 # master-workflow
@@ -193,6 +193,37 @@ Two workers may run at once **only if their file scopes are disjoint** and you
 have verified that. Otherwise sequence them: whichever defines the interface
 goes first, and the second builds against the accepted result. A frontend task
 must never invent a backend API that does not exist yet.
+
+## Lines builds (many lines, hours long)
+
+When a build has several lines of work (tracks, assets, features), each in its own git worktree, and will run for
+hours, do not start one loop per line. Use the lines kit in `lines/` next to this file: one Claude Code Workflow
+(`lines/run-lines.js`) drives every line, and `lines/lines.mjs` keeps its state in the project's progress log. Read
+`lines/README.md` for the file formats. Workers and reviewers are Claude subagents with fresh contexts; the
+reviewer's independence comes from its clean context, the findings list and the comparison with the best round.
+
+1. **Write `project.json` and `lines.json`.** Every line gets numbered criteria a stranger could check, and at least
+   one measurable check (numbers, test results, renders), not only "looks like the reference". Show them to the user
+   and stop, as in step 1 above.
+2. **Check the machine.** `node lines/lines.mjs limits <project>` says how many agents can run at once and what
+   limits it. Tell the user; if disk or memory is the limit, say what to free.
+3. **Install the restart hook.** Add `node "<kit>/lines.mjs" status "<project>" --hook` as a SessionStart hook
+   (matcher `startup|resume|compact|clear`) in the project's `.claude/settings.json`, so a session that starts,
+   resumes or compacts knows which lines were interrupted and how to resume them.
+4. **Launch one workflow.** `node lines/lines.mjs args <project> > args.json`, then
+   `Workflow({ scriptPath: "<kit>/run-lines.js", args: <that JSON> })`. Never one workflow per line: they could not
+   share the machine's limit.
+5. **Report as it runs.** Relay each round's line (score, better/same/worse, open findings). Heavy commands in the
+   project (Blender, browsers, renders) go through `lines/slot.mjs` or the project's own queue.
+6. **Stops come to the user.** A line that stalls three rounds returns `needs-decision`. Show the user the best
+   round's evidence and ask: accept it, continue with a direction, or drop it. Record the answer with
+   `lines.mjs decide <project> <line> accept|continue|drop "<their words>"`, then relaunch with `args <project> <line>`.
+7. **Verify before you report done,** as in step 5 above: read what merged into main and run the project's checks.
+
+The loop's rules are in the script, not up to you: the reviewer settles every open finding by id and may add at most
+three new blocking ones, each tied to a criterion; a round judged worse sends the next worker back to the best
+commit; two stalls bring a rethink that tests its idea on a scratch branch; three stop the line; passed and accepted
+lines merge one at a time.
 
 ## What not to do
 

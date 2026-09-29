@@ -1,0 +1,31 @@
+[
+  {
+    "id": "menu",
+    "name": "Title menu",
+    "cwd": "../toy-wt/menu",
+    "branch": "line/menu",
+    "port": 7810,
+    "scope": "src/menu/, src/style.css and docs/",
+    "criteria": [
+      "The menu screenshot shows the logo, Play, Settings and Quit, readable at 1280x720 and 390x844",
+      "Every button works with mouse, keyboard (Tab, Enter) and a gamepad (tools/pad.mjs shows each press reaching its button)",
+      "The menu reaches first paint in under 300 ms on npm run bench:menu (median of 5)"
+    ],
+    "notes": "Replace the placeholder menu with the design in docs/BRIEF.md, section Menu.",
+    "evidence": "Screenshots at both sizes, the pad log, and the bench numbers, on main and on the branch."
+  },
+  {
+    "id": "sound",
+    "name": "Sound",
+    "cwd": "../toy-wt/sound",
+    "branch": "line/sound",
+    "port": 7820,
+    "scope": "src/audio/, tools/ and docs/",
+    "criteria": [
+      "tools/render-sounds.mjs writes a WAV and a loudness line for every sound in docs/BRIEF.md, section Sound",
+      "One-shots of the same kind sit within 3 LU of each other, and the master's true peak stays under -1 dBTP"
+    ],
+    "after": ["menu"],
+    "notes": "The menu's button sounds come from the menu line, so this line starts once it has merged."
+  }
+]
